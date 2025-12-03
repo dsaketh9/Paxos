@@ -1,0 +1,219 @@
+/*
+I have taken the help of ChatGPT to generate the proto.paxos file I have an idea of all the methods and RPC's
+That need to be created but the formatting I have taken help from chatGPT as I am unfamiliar with protobuff
+*/
+
+
+syntax = "proto3";
+
+package paxos;
+
+option java_package = "paxos.rpc";
+option java_multiple_files = true;
+
+import "google/protobuf/empty.proto";
+
+// ---------------------- Banking command & reply ----------------------
+
+message Transaction {
+  string sender    = 1;
+  string receiver  = 2;
+  int32  amount    = 3;
+  int64  timestamp = 4; // client-assigned; used with client_id for exactly-once
+  string client_id = 5;
+  string request_id = 6;
+}
+
+message TxnReply {
+  Ballot ballot               = 1; // leader that handled the reply
+  int64      timestamp            = 2; // echo from request
+  bool       success              = 3;
+  string     message              = 4;
+  int32      sender_balance_after = 5;
+  int32      receiver_balance_after = 6;
+}
+
+// ---------------------- Identifiers & log entries ----------------------
+
+message Ballot {
+  int64 round   = 1;  // aka proposal number
+  int32 node_id = 2;  // tie-breaker
+}
+
+message LogEntry {
+  Ballot  ballot  = 1; // ballot under which it was accepted
+  int64       index   = 2; // sequence/slot number (starts at 1)
+  Transaction txn     = 3; // command (ignored if is_noop)
+  bool        is_noop = 4; // true if filler to close a gap
+}
+
+// ---------------------- Phase 1: Prepare / Promise ----------------------
+
+message Prepare { Ballot ballot = 1; }
+
+message Promise {
+  Ballot          ballot = 1;// the ballot we're promising for
+  bool ok=2;
+  repeated LogEntry   log    = 3;        // accepted entries this node knows about
+  int64               latest_checkpoint_index = 4; //  (bonus)
+  bytes checkpoint_state = 5;
+}
+
+// When an RPC must explain "no":
+message Reject {
+  Ballot promised_ballot = 1; // receiver’s current promise (higher than caller)
+  string     reason          = 2; // e.g., "LOW_BALLOT", "NEED_VIEW_CHANGE"
+  int64      last_known_index = 3; // optional hint to help the sender catch up
+}
+
+message PrepareResult {
+  oneof result {
+    Promise promise = 1;
+    Reject  reject  = 2;
+  }
+}
+
+// ---------------------- Phase 2: Accept / Accepted ----------------------
+
+message Accept {
+  Ballot  ballot  = 1;
+  int64       index   = 2;
+  Transaction txn     = 3;
+  bool        is_noop = 4;
+}
+
+message Accepted {
+  Ballot ballot = 1;
+  int64      index  = 2;
+  bool       ok     = 3; // true if accepted, false if rejected (lower ballot etc.)
+  string     from   = 4; // optional: sender id for quorum bookkeeping
+}
+
+message AcceptResult {
+  oneof result {
+    Accepted accepted = 1;
+    Reject   reject   = 2;
+  }
+}
+
+// ---------------------- Decide / Commit ----------------------
+
+message Commit {
+  Ballot  ballot  = 1;
+  int64       index   = 2;
+  Transaction txn     = 3;
+  bool        is_noop = 4;
+}
+
+message CommitAck {
+  int64 applied_up_to_index = 1; // follower’s last executed index after handling this commit
+}
+
+// ---------------------- View change (new leader installs prefix) ----------------------
+
+message ViewChange {
+  Ballot        ballot = 1;
+  repeated LogEntry log    = 2; // full, ordered 1 max (with no-ops for gaps) gaps filled with is_noop=true
+}
+
+message ViewChangeAck {
+  bool ok = 1; // follower adopted view
+  // indices the follower accepted at 'ballot'
+  repeated uint64 accepted_indices = 2;
+  // if follower rejected the whole batch due to higher promise:
+  Ballot promised_ballot = 3; // filled on reject
+  string reason = 4;; // highest index the follower aligned with in this view-change
+}
+
+message SyncRequest {
+  string node_id = 1;
+  int64 from_index = 2;
+}
+
+message SyncResponse {
+  repeated LogEntry log = 1;
+  int64 commit_index = 2;
+  Ballot leader_ballot = 3;
+}
+
+message DBDump {
+  map<string, int32> balances = 1;
+  int64 exec_index = 2;
+  int64 commit_index = 3;
+  Ballot current_ballot = 4;
+}
+
+message LogRow {
+  int64 index = 1;
+  Ballot ballot = 2;
+  bool is_noop = 3;
+  string status = 4; // "A"=accepted, "C"=committed, "E"=executed, "X"=missing
+  string txn = 5;    // "no-op" or formatted transaction string
+}
+message ViewDump {
+  repeated ViewChange history = 1;
+}
+
+message LogDump {
+  repeated LogRow rows = 1;
+}
+
+// ---------------------- Client API ----------------------
+
+message ClientRequest { Transaction txn = 1; }
+message ClientReply   { TxnReply    reply = 1; }
+
+// ---------------------- (Bonus) Checkpoint transport ----------------------
+
+message CheckpointMeta {
+  int64 index      = 1; // state reflects all decisions <= index
+  bytes state_hash = 2;
+  int64 size_bytes = 3;
+}
+
+message CheckpointFull {
+  CheckpointMeta meta       = 1;
+  bytes          full_state = 2; // serialized balances map (ok for small projects)
+}
+
+message CheckpointAck {
+  int64 installed_index = 1; // follower installed checkpoint up to this index
+}
+
+message PingRequest { string from = 1; }
+message PingResponse { string to = 1; string ok = 2; }
+
+// Control RPCs for testing/orchestration
+message PauseRequest {}
+message PauseResponse { bool paused = 1; }
+message ResumeRequest {}
+message ResumeResponse { bool resumed = 1; }
+
+// ---------------------- Service ----------------------
+
+service PaxosService {
+
+  // Typed RPCs (recommended for your implementation)
+  rpc PrepareRPC(Prepare) returns (PrepareResult);
+  rpc AcceptRPC(Accept)   returns (AcceptResult);
+  rpc CommitRPC(Commit)   returns (CommitAck);
+  rpc ViewChangeRPC(ViewChange) returns (ViewChangeAck);
+  rpc SyncRPC(SyncRequest) returns (SyncResponse);
+
+  // Client → Leader
+  rpc ClientRequestRPC(ClientRequest) returns (ClientReply);
+
+  // Admin helpers for debugging/demo
+  rpc GetDB(google.protobuf.Empty) returns (DBDump);
+  rpc GetLog(google.protobuf.Empty) returns (LogDump);
+  rpc GetView(google.protobuf.Empty) returns (ViewDump);
+
+  // Bonus: checkpoint install
+  rpc Ping (PingRequest) returns (PingResponse);
+  rpc SendCheckpoint(CheckpointFull) returns (CheckpointAck);
+  
+  // Control RPCs for testing/orchestration
+  rpc PauseNodeRPC(PauseRequest) returns (PauseResponse);
+  rpc ResumeNodeRPC(ResumeRequest) returns (ResumeResponse);
+
+}

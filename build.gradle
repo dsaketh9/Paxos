@@ -1,0 +1,66 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.google.protobuf' version '0.9.4'
+}
+
+group = 'distributed.assign1'          // optional metadata
+version = '1.0-SNAPSHOT'
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+
+repositories { mavenCentral() }
+
+def grpcVersion = '1.66.0'
+def protobufVersion = '3.25.5'        // fixes CVE; matches protoc
+
+dependencies {
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+    // Optional: reflection/health for debugging your server
+    implementation "io.grpc:grpc-services:${grpcVersion}"
+    implementation 'javax.annotation:javax.annotation-api:1.3.2'
+
+
+
+
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:${protobufVersion}" }
+    plugins { grpc { artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}" } }
+    generateProtoTasks {
+        all().each { t -> t.plugins { grpc {} } }  // generate *-grpc classes
+    }
+}
+
+// Keep your .proto files in: src/main/proto/   (no sourceSets tweak needed)
+
+application {
+    // CHANGE this to your real entrypoint class:
+    // e.g., 'distributed.assign1.node.ServerMain'
+    mainClass = 'paxos.Node.PaxosServer'
+}
+tasks.register('runSend', JavaExec) {
+    group = 'application'
+    description = 'Run tools.Send'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'tools.Send'
+    args 'client1', 'localhost', '60691', 'hello leader'
+}
+
+test { useJUnitPlatform() }
+
+// Helper task to print runtime classpath (useful for scripts)
+tasks.register('printRuntimeClasspath') {
+    doLast {
+        println sourceSets.main.runtimeClasspath.asPath
+    }
+
+}
